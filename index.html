@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="文学考研任务树、备考进度和学习记录。">
+  <title>文学考研备考规划</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <a class="brand" href="#home"><span class="seal" aria-hidden="true">文</span><span>文学考研<small>记录保存在此浏览器</small></span></a>
+      <nav aria-label="主要导航">
+        <a href="#home"><span>◫</span>总览</a>
+        <a href="#tree"><span>☷</span>任务树</a>
+        <a href="#pool"><span>◉</span>任务池</a>
+        <a href="#journal"><span>▦</span>学习记录</a>
+        <a href="#notes"><span>▤</span>资源库与错题</a>
+        <a href="#settings"><span>⚙</span>备考设置</a>
+      </nav>
+    </aside>
+    <main id="main"><p class="empty">正在读取备考计划…</p></main>
+  </div>
+  <div id="notice" role="status" aria-live="polite"></div>
+  <dialog id="editor"></dialog>
+</body>
+</html>
