@@ -1,5 +1,5 @@
 import { requestPlan } from "./pages-storage.js";
-import { courseTasks, groups, isSection, libraryResources, localDay, referenceResources, resourceFolderIndex, stats, statuses, taskIndex } from "./model.js";
+import { courseTasks, groups, isSection, libraryResources, localDay, mergeBackup, milestoneColors, milestoneLevels, milestoneStyle, monthPeriods, referenceResources, resourceFolderIndex, stats, statuses, taskIndex } from "./model.js";
 
 const main = document.querySelector("#main");
 const dialog = document.querySelector("#editor");
@@ -7,8 +7,11 @@ const notice = document.querySelector("#notice");
 const esc = (str) => String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const attrs = (values) => Object.entries(values).map(([k,v]) => ' data-' + k + '="' + esc(v) + '"').join("");
 const button = (label, cmd, data = {}, extra = "") => '<button type="button" data-cmd="' + cmd + '"' + attrs(data) + " " + extra + ">" + label + "</button>";
+const noteToggle = (note) => note ? button('<span aria-hidden="true">💬︎</span>', "toggleNote", {},
+  'class="note-toggle" aria-expanded="false" aria-label="备注" title="备注"') : "";
 const input = (label, name, value, options = "") => "<label>" + label + '<input name="' + name + '" value="' + esc(value) + '" ' + options + "></label>";
-const area = (label, name, value) => "<label>" + label + '<textarea rows="3" name="' + name + '">' + esc(value) + "</textarea></label>";
+const area = (label, name, value, options = "") => "<label>" + label + '<textarea rows="3" name="' + name + '"' +
+  (options ? " " + options : "") + ">" + esc(value) + "</textarea></label>";
 const select = (label, name, options, value) => "<label>" + label + '<select name="' + name + '">' + options.map(([key, text]) =>
   '<option value="' + esc(key) + '"' + (String(key) === String(value) ? " selected" : "") + ">" + esc(text) + "</option>").join("") + "</select></label>";
 const form = (action, fields, id = "") => '<form data-action="' + action + '" data-id="' + esc(id) + '">' + fields + '<p class="form-error" role="alert" hidden></p><div><button class="primary">保存</button></div></form>';
@@ -19,8 +22,12 @@ const hours = (num) => new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2
 const shifted = (date, days) => new Date(Date.parse(date + "T12:00:00Z") + days * 86400000).toISOString().slice(0, 10);
 const today = () => localDay();
 const statusTag = (status) => '<span class="tag ' + (status === "REVIEW" ? "review" : "") + '">' + statuses[status] + "</span>";
-let saved, busy = false, noticeTimer, drag, pinnedModule = "";
+let saved, busy = false, noticeTimer, drag, renderedRoute, pinnedModule = "";
 let selected = today(), calendarMode = "month";
+let timelineColor = "";
+let timelineOpen = true;
+let libraryArchiveOpen = false;
+const timelineColors = [["", "全部颜色"], ["gray", "灰褐"], ...Object.entries(milestoneColors).filter(([color]) => color !== "auto")];
 const filters = { status: "OPEN", module: "", priority: "0", due: "" };
 const expanded = new Set();
 const folderViewKey = "literature-planner:open-resource-folders";
@@ -95,7 +102,7 @@ async function save(action, data, errorNode) {
     saved = result;
     if (dialog.open) dialog.close();
     render();
-    flash("已保存");
+    flash(action === "importBackup" ? "备份已合并，原有记录已保留。" : "已保存");
   } catch (error) {
     if (errorNode?.isConnected) {
       errorNode.textContent = error.message;
@@ -111,7 +118,8 @@ function home() {
   const plan = current();
   const { deadline, school } = plan.settings;
   const total = stats(plan.tasks, plan.logs);
-  const days = deadline ? Math.round((Date.parse(deadline) - Date.parse(today())) / 86400000) : null;
+  const currentDay = today();
+  const days = deadline ? Math.round((Date.parse(deadline) - Date.parse(currentDay)) / 86400000) : null;
   const metric = (number, label) => '<div class="stat"><small>' + label + "</small><strong>" + number + "</strong></div>";
   return heading("文学考研备考规划", school ? school + " · " + (plan.settings.direction || "备考总览") : "从公共课和汉语言文学基础开始，定校后再配置专业课。", '<a class="button" href="#settings">备考设置</a>') +
     '<div class="overview"><section class="hero"><small class="quiet">考试倒计时</small><strong>' +
@@ -119,13 +127,25 @@ function home() {
     (days === null ? "可先为单项任务设置截止日期" : (days < 0 ? "已过截止日期 · " : "目标日期 · ") + esc(deadline)) +
     '</p><progress aria-label="总完成度" max="100" value="' + total.percent + '"></progress></section><div class="metrics">' +
     metric(total.percent + "%", "总完成度") + metric(total.remaining, "剩余任务") + metric(hours(total.estimated), "预计时长") +
-    metric(hours(total.logged), "已投入") + '</div></div><h2>学习板块</h2><div class="cards">' +
+    metric(hours(total.logged), "已投入") + '</div></div>' + fiveDayPlans(plan.dates, currentDay) +
+    '<h2>学习板块</h2><div class="cards">' +
     Object.entries(groups).map(([id, name]) => {
       const ids = new Set(plan.modules.filter((item) => item.group === id).map((item) => item.id));
       const progress = stats(plan.tasks.filter((task) => ids.has(task.moduleId)), plan.logs.filter((log) => ids.has(log.moduleId)));
       return '<a class="panel modulecard" href="#tree/' + id + '"><h3>' + name + '</h3><progress aria-label="完成度" max="100" value="' +
         progress.percent + '"></progress><footer><span>' + progress.percent + '%</span><span>已投入 ' + hours(progress.logged) + "</span></footer></a>";
     }).join("") + "</div>";
+}
+
+function fiveDayPlans(dates, currentDay) {
+  const rows = Array.from({ length: 5 }, (_, offset) => {
+    const date = shifted(currentDay, offset - 1);
+    const text = dates[date];
+    return '<li><time datetime="' + date + '">' + date + '</time>' +
+      (text ? '<p class="multiline">' + esc(text) + '</p>' : '<p class="quiet">未填写</p>') + '</li>';
+  });
+  return panel('<div class="row wrap"><h2 class="recent-plans-title">五天计划</h2>' +
+    '<a class="button" href="#journal">学习记录</a></div><ol class="recent-plans">' + rows.join("") + '</ol>');
 }
 
 const sortData = (action, id, group) => attrs({ "sort-action": action, "sort-id": id, "sort-group": group });
@@ -162,7 +182,7 @@ function taskLine(task, inTree = false) {
   if (isSection(task)) {
     const open = expanded.has(task.id);
     return '<div class="row task section-row" data-section="' + esc(task.id) + '"' +
-      (inTree ? sortData("move", task.id, task.moduleId + "/") : "") + ">" +
+      (inTree ? sortData("move", task.id, task.moduleId + "/") + attrs({ "task-module": task.moduleId }) : "") + ">" +
       (inTree ? sortHandle(task.name) : "") + '<div class="body">' +
       (inTree ? button('<span aria-hidden="true">' + (open ? "▾" : "▸") + "</span> " + esc(task.name), "sectionExpand",
         { id: task.id }, 'class="section-toggle" aria-expanded="' + open + '" aria-controls="branch-' + esc(task.id) + '"') :
@@ -198,15 +218,26 @@ function tree(id) {
       return "<li>" + taskLine(task, true) + branch + "</li>";
     }).join("");
   };
-  return heading(groups[id] ?? "任务树", "拖动左侧手柄排序。将任务拖到所属大板块的标题上，可转为小板块。", button("+ 学科", "module", {}, 'class="primary"')) +
-    matched.map((module) => ('<details class="module" data-expand="' + esc(module.id) + '"' + (expanded.has(module.id) || pinnedModule === module.id ? " open" : "") +
-      "><summary" + attrs({ "section-drop": module.id }) + (module.group === "literature" ? sortData("moveModule", module.id, "literature") : "") + ">" +
-      (module.group === "literature" ? sortHandle(module.name) : "") +
-      '<span>' + esc(module.name) + (module.deadline ? " · " + esc(module.deadline) : "") + '</span></summary><div class="module-body">' +
-      '<div class="actions">' + button("+ 根任务", "task", { module: module.id }) +
-      button("+ 小板块", "task", { module: module.id, kind: "section" }) + button("板块设置", "module", { id: module.id }) + "</div>" +
-      (index.siblings(module.id).length ? '<ul class="tree">' + branches(module.id) + "</ul>" : empty("还没有任务，可以从教材、专题或题型开始拆分。")) +
-      "</div></details>")).join("") + (matched.length ? "" : empty("此处没有可用板块。"));
+  return heading(groups[id] ?? "任务树", "拖动左侧手柄排序，拖到大板块或小板块标题可移动整个任务分支。", button("+ 学科", "module", {}, 'class="primary"')) +
+    matched.map((module) => {
+      const open = expanded.has(module.id) || pinnedModule === module.id;
+      const branchId = "module-branch-" + esc(module.id);
+      const title = esc(module.name) + (module.deadline ? " · " + esc(module.deadline) : "");
+      return '<section class="module" data-note-disclosure><div class="module-header"' +
+        attrs({ "section-drop": module.id }) + (module.group === "literature" ? sortData("moveModule", module.id, "literature") : "") + ">" +
+        (module.group === "literature" ? sortHandle(module.name) : "") +
+        button('<span aria-hidden="true">' + (open ? "▾" : "▸") + '</span><span>' + title + '</span>', "sectionExpand",
+          { id: module.id }, 'class="section-toggle module-title" aria-expanded="' + open + '" aria-controls="' + branchId + '"') +
+        noteToggle(module.note) + '</div>' +
+        (module.note ? '<div class="module-note" data-note-text hidden><div class="row wrap"><h3>板块备注</h3><div class="actions">' +
+          button("编辑备注", "moduleNote", { id: module.id }) + '</div></div><p class="multiline">' + esc(module.note) + "</p></div>" : "") +
+        '<div class="module-body" id="' + branchId + '"' + (open ? "" : " hidden") + '><div class="actions">' +
+        button("+ 根任务", "task", { module: module.id }) + button("+ 小板块", "task", { module: module.id, kind: "section" }) +
+        button("板块设置", "module", { id: module.id }) +
+        (module.note ? "" : button("添加备注", "moduleNote", { id: module.id })) + '</div>' +
+        (index.siblings(module.id).length ? '<ul class="tree">' + branches(module.id) + "</ul>" : empty("还没有任务，可以从教材、专题或题型开始拆分。")) +
+        "</div></section>";
+    }).join("") + (matched.length ? "" : empty("此处没有可用板块。"));
 }
 
 function pool() {
@@ -226,24 +257,113 @@ function pool() {
     (tasks.length ? panel(tasks.map((task) => taskLine(task)).join("")) : empty("没有符合条件的任务。"));
 }
 
+function milestonePeriodLabel(item) {
+  return item.month.slice(0, 4) + "年" + Number(item.month.slice(5)) + "月" + monthPeriods[item.period] + "（暂估）";
+}
+
+function milestoneDisplayColor({ importance, color }) {
+  return color === "auto" ? (importance === "important" ? "red" : "gray") : color;
+}
+
+function milestoneAppearance(item) {
+  const style = milestoneStyle(item);
+  return attrs({ "milestone-level": style.importance, "milestone-color": milestoneDisplayColor(style) });
+}
+
+function milestoneInfo(item) {
+  const dateText = item.precision === "period"
+    ? esc(milestonePeriodLabel(item))
+    : '<time datetime="' + esc(item.date) + '">' + esc(item.date) + '</time>' +
+      (item.endDate && item.endDate !== item.date ? ' 至 <time datetime="' + esc(item.endDate) + '">' + esc(item.endDate) + '</time>' : "");
+  const important = milestoneStyle(item).importance === "important";
+  return '<div class="milestone-info" data-note-disclosure' + milestoneAppearance(item) + '><span class="milestone-date">' + dateText +
+    '</span>' + (important ? ' <span class="milestone-badge">重要</span>' : "") +
+    '<h3>' + esc(item.name) + noteToggle(item.note) + '</h3>' +
+    (item.note ? '<p class="milestone-note multiline" data-note-text hidden>' + esc(item.note) + '</p>' : "") +
+    (webLink(item.link) ? showLocation(item.link, "打开相关网站 ↗") : "") + '</div>';
+}
+
+function timeline(ordered) {
+  const visible = timelineColor ? ordered.filter((item) => milestoneDisplayColor(milestoneStyle(item)) === timelineColor) : ordered;
+  return panel('<section aria-labelledby="timeline-title"><div class="row wrap">' +
+    '<h2 id="timeline-title">' + button("备考时间轴", "toggleTimeline", {},
+      'class="timeline-toggle" aria-controls="timeline-content" aria-expanded="' + timelineOpen + '"') +
+    '</h2>' + button("+ 添加节点", "milestone") + '</div>' +
+    '<div id="timeline-content"' + (timelineOpen ? "" : " hidden") + '>' +
+    '<div class="timeline-filter">' + select("按颜色筛选", "timelineColor", timelineColors, timelineColor) + '</div>' +
+    (visible.length ? '<ol class="timeline">' + visible.map((item) =>
+      '<li' + milestoneAppearance(item) + '><div class="row wrap">' + milestoneInfo(item) +
+      '<div class="actions">' + button("编辑", "milestone", { id: item.id }) +
+      button("删除", "removeMilestone", { id: item.id }) + '</div></div></li>').join("") + '</ol>'
+      : empty(ordered.length ? "当前颜色下暂无节点。" : "添加报名、初试或复试等重要节点，集中查看备考安排。")) + '</div></section>');
+}
+
+function calendarBars(items, firstDay, viewStart) {
+  const days = Array.from({ length: 7 }, (_, offset) => shifted(firstDay, offset));
+  const lastDay = days[6];
+  const lanes = [];
+  for (const item of items) {
+    const endDate = item.endDate || item.date;
+    if (item.date > lastDay || endDate < firstDay) continue;
+    const start = days.indexOf(item.date < firstDay ? firstDay : item.date);
+    const end = days.indexOf(endDate > lastDay ? lastDay : endDate);
+    let lane = lanes.find((row) => row.end < start);
+    if (!lane) {
+      lane = { end: -1, bars: [] };
+      lanes.push(lane);
+    }
+    lane.end = end;
+    const continuesFrom = item.date < firstDay;
+    const continuesTo = endDate > lastDay;
+    const estimated = item.precision === "period";
+    const classes = ["calendar-bar", estimated ? "estimated" : "", continuesFrom ? "from-previous" : "", continuesTo ? "to-next" : ""].filter(Boolean).join(" ");
+    const label = item.name + "，" + milestoneLevels[milestoneStyle(item).importance] + "，" + (estimated ? milestonePeriodLabel(item) :
+      item.date + (endDate !== item.date ? " 至 " + endDate : ""));
+    const showName = !continuesFrom || firstDay === viewStart;
+    lane.bars.push(button(showName ? '<span>' + esc(item.name) + '</span>' : '<span aria-hidden="true">↳</span>',
+      "calendarMilestone", { id: item.id, column: start + 1, span: end - start + 1 },
+      'class="' + classes + '" aria-label="' + esc(label) + '" title="' + esc(label) + '"' + milestoneAppearance(item)));
+  }
+  return lanes.map((lane) => '<div class="calendar-grid calendar-lane">' + lane.bars.join("") + '</div>').join("");
+}
+
 function journal() {
   const plan = current();
+  const ordered = [...(plan.milestones ?? [])].sort((a, b) => a.date.localeCompare(b.date));
+  const milestonesOn = (date) => ordered.filter((item) => item.date <= date && date <= (item.endDate || item.date));
+  const selectedMilestones = milestonesOn(selected);
   const first = selected.slice(0, 7) + "-01";
   const weekday = (date) => (new Date(date).getUTCDay() + 6) % 7;
   const start = calendarMode === "month" ? shifted(first, -weekday(first)) : shifted(selected, -weekday(selected));
-  const calendar = [];
-  for (let i = 0; i < (calendarMode === "month" ? 42 : 7); i++) {
-    const date = shifted(start, i);
-    const total = plan.logs.filter((log) => log.date === date).reduce((sum, log) => sum + log.hours, 0);
-    calendar.push(button(String(Number(date.slice(-2))) + (total ? "<small>" + hours(total) + "</small>" : plan.dates[date] ? "<small>有计划</small>" : ""),
-      "day", { date }, 'aria-label="' + date + '" aria-pressed="' + (date === selected) + '"' + (total || plan.dates[date] ? ' class="marked"' : "")));
+  const weeks = [];
+  for (let i = 0; i < (calendarMode === "month" ? 6 : 1); i++) {
+    const weekStart = shifted(start, i * 7);
+    const days = [];
+    for (let j = 0; j < 7; j++) {
+      const date = shifted(weekStart, j);
+      const total = plan.logs.filter((log) => log.date === date).reduce((sum, log) => sum + log.hours, 0);
+      const items = milestonesOn(date);
+      const classes = total || plan.dates[date] ? "marked" : "";
+      const label = [date, ...items.map((item) => item.name), total ? hours(total) : "", plan.dates[date] ? "有计划" : ""]
+        .filter(Boolean).join("，");
+      days.push(button(String(Number(date.slice(-2))) +
+        (total ? "<small>" + hours(total) + "</small>" : plan.dates[date] ? "<small>有计划</small>" : ""),
+        "day", { date }, 'class="' + classes + '" aria-label="' + esc(label) + '" aria-pressed="' + (date === selected) + '"'));
+    }
+    weeks.push('<div class="calendar-week"><div class="calendar-grid calendar-dates">' + days.join("") +
+      '</div>' + calendarBars(ordered, weekStart, start) + '</div>');
   }
   const logs = plan.logs.filter((log) => log.date === selected);
   return heading("学习记录", "在日历里安排学习，按学科或任务记录投入时间。", button("+ 添加学习时间", "log", {}, 'class="primary"')) +
+    timeline(ordered) +
     panel('<div class="row wrap"><h3>' + selected.slice(0, 7) + '</h3><div class="actions">' + button("上一" + (calendarMode === "month" ? "月" : "周"), "calendar", { move: -1 }) +
     button("今天", "day", { date: today() }) + button("下一" + (calendarMode === "month" ? "月" : "周"), "calendar", { move: 1 }) +
     button(calendarMode === "month" ? "周视图" : "月视图", "calendarMode") + '</div></div><div class="calendar">' +
-    ["一","二","三","四","五","六","日"].map((x) => "<small>" + x + "</small>").join("") + calendar.join("") + "</div>") +
+    '<div class="calendar-grid calendar-weekdays">' + ["一","二","三","四","五","六","日"].map((x) => "<small>" + x + "</small>").join("") +
+    '</div>' + weeks.join("") + "</div>" +
+    (selectedMilestones.length ? '<section class="calendar-milestones" aria-labelledby="calendar-milestones-title">' +
+      '<h3 id="calendar-milestones-title">' + esc(selected) + ' · 备考事项</h3>' +
+      '<ul>' + selectedMilestones.map((item) => '<li' + milestoneAppearance(item) + '>' + milestoneInfo(item) + '</li>').join("") + '</ul></section>' : "")) +
     panel("<h2>" + selected + "</h2>" + form("dateNote", '<input type="hidden" name="date" value="' + selected + '">' + area("当天计划", "text", plan.dates[selected])) +
     '<div class="section"><h3>当天投入</h3>' + (logs.length ? logs.map((log) => '<div class="row wrap task"><div><strong>' +
     esc(moduleName(log.moduleId)) + " · " + hours(log.hours) + '</strong><div class="multiline">' + esc(log.text) + "</div></div><div class=\"actions\">" +
@@ -265,7 +385,7 @@ function folderOptions(index, excluding) {
   const options = [["", "资源库根目录"]];
   function visit(parent, ancestors) {
     for (const folder of index.children.get(parent) ?? []) {
-      if (folder.id === excluding) continue;
+      if (folder.id === excluding || folder.archived) continue;
       const path = [...ancestors, folder.name];
       options.push([folder.id, path.join(" / ")]);
       visit(folder.id, path);
@@ -277,41 +397,57 @@ function folderOptions(index, excluding) {
 
 function notes() {
   const plan = current();
-  const resources = libraryResources(plan);
-  const errors = plan.notes.filter((note) => note.kind === "error");
+  const allResources = libraryResources(plan);
   const index = resourceFolderIndex(plan);
+  const ungrouped = allResources.filter((note) => !index.isArchived(note.folderId));
+  const resources = ungrouped.filter((note) => !note.archived);
+  const archived = ungrouped.filter((note) => note.archived);
+  const archivedFolders = [...index.byId.values()].filter((folder) => folder.archived && !index.isArchived(folder.parentId));
+  const archiveCount = archived.length + archivedFolders.length;
+  const occupiedFolders = new Set(allResources.map((note) => note.folderId));
+  const errors = plan.notes.filter((note) => note.kind === "error");
   const entries = new Map();
-  for (const note of resources) {
+  for (const note of allResources) {
     const folder = index.byId.has(note.folderId) ? note.folderId : null;
     if (!entries.has(folder)) entries.set(folder, []);
     entries.get(folder).push(note);
   }
   const folderPath = (note) => index.path(note.folderId).map((folder) => folder.name).join(" / ");
-  function resource(note, showPath = false) {
+  function resource(note, showPath = false, inArchivedFolder = false) {
     const path = folderPath(note);
     const count = plan.tasks.filter((task) => task.resourceIds?.includes(note.id)).length;
-    return resourceRow(note, '<div class="row resource-entry"' + (showPath ? "" : attrs({ "library-id": note.id, "library-kind": "resource" })) +
-      ">" + (showPath ? "" : libraryHandle(note.title)) + '<div class="resource-label"><strong>' +
+    const draggable = !note.archived && !inArchivedFolder;
+    return resourceRow(note, '<div class="row resource-entry"' + (draggable ? attrs({ "library-id": note.id, "library-kind": "resource" }) : "") +
+      ">" + (draggable ? libraryHandle(note.title) : "") + '<div class="resource-label"><strong>' +
       (webLink(note.source) ? showLocation(note.source, note.title) : esc(note.title)) +
       '</strong>' + (showPath ? '<small class="resource-location">' + esc(path || "根目录") + '</small>' : "") +
       (note.source && !webLink(note.source) ? '<small class="resource-location">' + esc(note.source) + "</small>" : "") +
       (note.text ? '<small class="resource-location multiline">' + esc(note.text) + "</small>" : "") +
-      '</div><div class="actions">' + button("编辑", "note", { id: note.id }) +
-      (count ? "<small>" + count + " 项引用</small>" : button("删除", "removeNote", { id: note.id })) + "</div></div>", path);
+      '</div>' + (inArchivedFolder ? "" : '<div class="actions">' + button("编辑", "note", { id: note.id }) +
+      (note.archived ? button("恢复", "archiveResource", { id: note.id, archived: "" }) :
+        count ? "<small>" + count + " 项引用</small>" : button("删除", "removeNote", { id: note.id })) + "</div>") + "</div>", path);
   }
-  function tree(parent) {
-    const folders = (index.children.get(parent) ?? []).map((folder) =>
-      '<details class="resource-folder" data-folder="' + esc(folder.id) + '"' + (openFolders.has(folder.id) ? " open" : "") +
-      '><summary' + attrs({ "library-id": folder.id, "library-kind": "folder", "library-drop": "move" }) +
-      '>' + libraryHandle(folder.name) + '<span>' + esc(folder.name) + '</span></summary><div class="resource-branch"><div class="actions">' +
+  function folderBranch(folder, inArchive, archiveRoot = false) {
+    const origin = archiveRoot ? index.path(folder.parentId).map((item) => item.name).join(" / ") : "";
+    const sort = inArchive ? "" : attrs({ "library-id": folder.id, "library-kind": "folder", "library-drop": "move" });
+    return '<details class="resource-folder" data-folder="' + esc(folder.id) + '"' + (openFolders.has(folder.id) ? " open" : "") +
+      '><summary' + sort + '>' + (inArchive ? "" : libraryHandle(folder.name)) + '<span>' + esc(folder.name) + '</span>' +
+      (archiveRoot ? ' <span class="actions archive-folder-actions">' + button("恢复文件夹", "archiveResource", { id: folder.id, archived: "" }) + '</span>' : "") +
+      '</summary><div class="resource-branch">' + (inArchive ? (origin ? '<small class="resource-location">原位置 ' + esc(origin) + '</small>' : "") :
+      '<div class="actions">' +
       button("+ 资源", "note", { kind: "resource", folder: folder.id }) +
       button("+ 子文件夹", "resourceFolder", { parent: folder.id }) +
       button("编辑文件夹", "resourceFolder", { id: folder.id }) +
-      (index.children.has(folder.id) || entries.has(folder.id) ||
+      (index.children.has(folder.id) || occupiedFolders.has(folder.id) ||
         plan.tasks.some((task) => task.resourceIds?.includes(folder.id)) || folder.resource?.taskId
         ? "" : button("删除空文件夹", "removeResourceFolder", { id: folder.id })) +
-      "</div>" + tree(folder.id) + "</div></details>").join("");
-    return folders + (entries.get(parent) ?? []).map((note) => resource(note)).join("");
+      "</div>") + tree(folder.id, inArchive) + "</div></details>";
+  }
+  function tree(parent, inArchive = false) {
+    const folders = (index.children.get(parent) ?? []).filter((folder) => inArchive || !folder.archived);
+    const notes = (entries.get(parent) ?? []).filter((note) => inArchive || !note.archived);
+    return folders.map((folder) => folderBranch(folder, inArchive)).join("") +
+      notes.map((note) => resource(note, false, inArchive)).join("");
   }
   const card = (note) => panel('<div class="row wrap"><h3>' + esc(note.title) + '</h3><div class="actions">' +
       button("编辑", "note", { id: note.id }) +
@@ -322,14 +458,20 @@ function notes() {
       '</p><p class="multiline">' + esc(note.text) + "</p>");
   return heading("资源库与错题", "盘点手头的教材、课程和经验贴，在任务里随时引用。") +
     '<section data-resource-scope><div class="row wrap"><h2>资源库</h2><div class="actions">' +
-    button("+ 新增资源", "note", { kind: "resource" }, 'class="primary"') + button("+ 新建文件夹", "resourceFolder") + "</div></div>" +
+    button("+ 新增资源", "note", { kind: "resource" }, 'class="primary"') + button("+ 新建文件夹", "resourceFolder") +
+    button('<span aria-hidden="true">🗃︎</span> 归档桶（' + archiveCount + '）', "libraryArchive", { "library-drop": "archive" },
+      'aria-controls="resource-archive" aria-expanded="' + libraryArchiveOpen + '" title="可将资源或文件夹拖入归档桶"') + "</div></div>" +
     (resources.length ? resourceFilter("搜索资源库") : "") +
-    '<div class="resource-tree" data-resource-tree><p class="quiet"><small>抓住左侧手柄，拖到文件夹标题或下方的整理区。</small></p>' +
+    '<div class="resource-tree" data-resource-tree><p class="quiet"><small>抓住左侧手柄，拖到文件夹、整理区或归档桶。</small></p>' +
     '<div class="library-dock"><span data-library-drop="move">移到根目录</span><span data-library-drop="folder">转为文件夹</span>' +
     '<span data-library-drop="resource">转为资源</span></div>' +
     (tree(null) || empty("新建文件夹或登记一份资源，即可开始整理。")) +
     '</div><div class="resource-tree" data-resource-results hidden>' + resources.map((note) => resource(note, true)).join("") +
     '<p class="empty" data-no-resources hidden>没有匹配的资源。</p></div>' +
+    '<section id="resource-archive" class="resource-tree" aria-labelledby="resource-archive-title"' + (libraryArchiveOpen ? "" : " hidden") +
+    '><h3 id="resource-archive-title">归档资源</h3>' +
+    (archiveCount ? archivedFolders.map((folder) => folderBranch(folder, true, true)).join("") +
+      archived.map((note) => resource(note, true)).join("") : empty("归档桶为空。")) + "</section>" +
     '</section><section class="section"><div class="row wrap"><h2>错题</h2>' +
     button("+ 错题", "note", { kind: "error" }) + "</div>" +
     (errors.length ? errors.map(card).join("") : empty("还没有错题。")) + "</section>";
@@ -343,13 +485,15 @@ function libraryHandle(name) {
 function referenceFields(task) {
   const index = resourceFolderIndex(current());
   const selected = new Set(task.resourceIds ?? []);
-  const resources = referenceResources(current()).filter((note) => !note.isFolder || selected.has(note.id));
+  const resources = referenceResources(current()).filter((note) =>
+    (!note.isFolder && !note.archived && !index.isArchived(note.folderId)) || selected.has(note.id));
   return '<fieldset class="reference-fields" data-resource-scope><legend>参考资料</legend>' +
     (resources.length ? resourceFilter("从资源库选择（可多选）") + '<div class="checks resource-options">' +
       resources.map((note) => {
         const path = index.path(note.folderId).map((folder) => folder.name).join(" / ");
         return resourceRow(note, '<label><input type="checkbox" name="resourceIds" value="' +
-        esc(note.id) + '"' + (selected.has(note.id) ? " checked" : "") + '><span>' + esc(note.title) + (note.isFolder ? "（已转为文件夹）" : "") +
+        esc(note.id) + '"' + (selected.has(note.id) ? " checked" : "") + '><span>' + esc(note.title) +
+        (note.isFolder ? "（已转为文件夹）" : note.archived || index.isArchived(note.folderId) ? "（已归档）" : "") +
         (path ? '<small class="resource-location">' + esc(path) + "</small>" : "") +
         (note.source ? '<small class="resource-location">' + esc(note.source) + "</small>" : "") + "</span></label>", path);
       }).join("") +
@@ -360,7 +504,8 @@ function referenceFields(task) {
 
 function settings() {
   const plan = current(), s = plan.settings;
-  return heading("备考设置", "确定院校和考试范围后，可以把已有学科或专题关联到两门专业课。", button("导出备份", "export")) +
+  return heading("备考设置", "确定院校和考试范围后，可以把已有学科或专题关联到两门专业课。",
+    '<div class="actions">' + button("导出备份", "export") + button("导入备份", "importBackup") + "</div>") +
     panel("<h2>考试信息</h2>" + form("settings", '<div class="fields">' +
       input("目标院校", "school", s.school) + input("报考方向", "direction", s.direction) +
       input("考试年份", "year", s.year, 'inputmode="numeric" pattern="[0-9]{4}"') +
@@ -395,7 +540,8 @@ function render() {
     if (link.hash === "#" + (page === "course" ? "settings" : page)) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   });
-  if (page === "tree" && arg && arg !== "literature") expanded.add(arg);
+  if (renderedRoute !== location.hash && page === "tree" && arg && arg !== "literature") expanded.add(arg);
+  renderedRoute = location.hash;
   main.innerHTML = ({ home, tree, pool, journal, notes, settings, course: coursePage }[page] ?? home)(arg);
   main.querySelectorAll("details[data-folder]").forEach((item) => {
     item.addEventListener("toggle", () => {
@@ -417,9 +563,72 @@ function open(label, content) {
   if (!dialog.open) dialog.showModal();
 }
 
+async function previewBackup(input) {
+  const form = input.form;
+  const submit = form.querySelector("button.primary");
+  const preview = form.querySelector("[data-backup-preview]");
+  const file = input.files[0];
+  submit.disabled = true;
+  preview.textContent = "";
+  form.backup = null;
+  if (!file) return;
+  try {
+    if (file.size > 2_000_000) throw new Error("请选择小于 2 MB 的备份。");
+    const backup = JSON.parse((await file.text()).replace(/^\uFEFF/, ""));
+    if (input.files[0] !== file) return;
+    const counts = mergeBackup(structuredClone(current()), backup);
+    const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+    preview.textContent = total ? "将新增 " + counts.tasks + " 个任务或小板块、" + counts.logs + " 条学习记录、" +
+      counts.modules + " 个学科、" + counts.folders + " 个文件夹、" + counts.notes + " 条资料或错题、" +
+      counts.dates + " 条日历计划、" + counts.milestones + " 个时间轴节点。" : "这份备份没有可新增的内容。";
+    if (total) {
+      form.backup = backup;
+      submit.disabled = false;
+    }
+  } catch (error) {
+    if (input.files[0] === file) preview.textContent = error instanceof SyntaxError
+      ? "文件不是可读取的 JSON 备份。" : error.message;
+  }
+}
+
 function edit(cmd, data) {
   const plan = current();
   const id = data.id;
+  if (cmd === "moveTaskModule" || cmd === "deleteModule") {
+    const deleting = cmd === "deleteModule";
+    const item = (deleting ? plan.modules : plan.tasks).find((entry) => entry.id === id);
+    if (!item) return;
+    const sourceId = deleting ? item.id : item.moduleId;
+    const destinations = plan.modules.filter((entry) => entry.id !== sourceId && !entry.archived)
+      .map((entry) => [entry.id, groups[entry.group] + " / " + entry.name]);
+    const options = deleting ? [...destinations, ["", "一并删除板块内的任务和学习时间记录"]] : destinations;
+    open((deleting ? "删除板块 · " : "移动任务 · ") + item.name,
+      (deleting ? "<p>选择内容转移目标，或一并删除。删除板块前将再次确认。</p>" : "<p>子任务和关联记录会随任务一起移动，任务放到目标板块根目录。</p>") +
+      form(deleting ? "removeModule" : "moveTaskModule",
+        '<input type="hidden" name="' + (deleting ? "moduleId" : "id") + '" value="' + esc(id) + '">' +
+        select(deleting ? "内容处理" : "目标板块", "destination", options, options[0]?.[0] ?? "")));
+    return;
+  }
+  if (cmd === "milestone") {
+    const item = (plan.milestones ?? []).find((entry) => entry.id === id);
+    const estimated = item?.precision === "period";
+    const { importance, color } = milestoneStyle(item ?? {});
+    open(item ? "编辑时间轴节点" : "添加时间轴节点", form("milestone",
+      input("事项", "name", item?.name, 'required maxlength="120" placeholder="例如：考研报名"') +
+      '<div class="fields">' + select("重要程度", "importance", Object.entries(milestoneLevels), importance) +
+      select("颜色", "color", Object.entries(milestoneColors), color) + "</div>" +
+      select("日期精度", "precision", [["exact", "具体日期"], ["period", "按旬估计"]], estimated ? "period" : "exact") +
+      '<fieldset class="milestone-fields fields" data-date-fields="exact"' + (estimated ? " hidden disabled" : "") + '>' +
+      input("日期或开始日期", "date", estimated ? "" : item?.date, 'type="date" required') +
+      input("结束日期（可选）", "endDate", estimated ? "" : item?.endDate, 'type="date"') + '</fieldset>' +
+      '<fieldset class="milestone-fields fields" data-date-fields="period"' + (estimated ? "" : " hidden disabled") + '>' +
+      input("月份", "month", item?.month ?? item?.date.slice(0, 7) ?? today().slice(0, 7),
+        'type="month" required placeholder="YYYY-MM" pattern="[0-9]{4}-(0[1-9]|1[0-2])"') +
+      select("旬", "period", Object.entries(monthPeriods), item?.period ?? "early") + '</fieldset>' +
+      input("相关网址（可选）", "link", item?.link, 'type="url" maxlength="2048" placeholder="https://"') +
+      area("备注（可选）", "note", item?.note, 'maxlength="3000"'), id));
+    return;
+  }
   if (cmd === "resourceFolder") {
     const index = resourceFolderIndex(plan);
     const folder = index.byId.get(id);
@@ -444,9 +653,18 @@ function edit(cmd, data) {
       referenceFields(task) + area(section ? "板块说明" : "说明与完成标准", "notes", task.notes), id) +
       (id ? '<div class="section actions">' + (section ? button("转为根任务", "makeTask", { id }) :
         button("转为小板块", "makeSection", { id, "module-id": moduleId })) +
+        button("移动到其他板块", "moveTaskModule", { id }) +
         button("删除" + type, "removeTask", { id }) + "</div>" : ""));
     if (data.parent) expanded.add(data.parent);
     pinnedModule = moduleId;
+  }
+  if (cmd === "moduleNote") {
+    const item = plan.modules.find((row) => row.id === id);
+    if (!item) return;
+    open(item.name + " · 板块备注", form("moduleNote",
+      '<input type="hidden" name="moduleId" value="' + esc(item.id) + '">' +
+      area("备注", "note", item.note, 'maxlength="3000"')));
+    return;
   }
   if (cmd === "module") {
     const item = plan.modules.find((row) => row.id === id) ?? {};
@@ -455,7 +673,8 @@ function edit(cmd, data) {
       '<input type="hidden" name="moduleId" value="' + esc(id) + '">' +
       (canEdit ? input("学科名称", "name", item.name, "required") : "<p>" + esc(item.name) + "</p>") +
       input("板块截止日期", "deadline", item.deadline, 'type="date"') +
-      (canEdit && id ? select("可见状态", "archived", [["","使用中"],["yes","已归档"]], item.archived ? "yes" : "") : "")));
+      (canEdit && id ? select("可见状态", "archived", [["","使用中"],["yes","已归档"]], item.archived ? "yes" : "") : "")) +
+      (id ? '<div class="section actions">' + button("删除板块", "deleteModule", { id }) + '</div>' : ""));
   }
   if (cmd === "course") {
     const slot = Number(data.slot);
@@ -480,7 +699,8 @@ function edit(cmd, data) {
     const moduleId = item.moduleId ?? (isResource ? "" : allModules()[0]?.[0]);
     open(isLog ? "记录学习时间" : kind === "error" ? "错题记录" : "资源登记", form(cmd,
       (isResource
-        ? select("存放文件夹", "folderId", folderOptions(resourceFolderIndex(plan)), item.folderId ?? data.folder ?? "")
+        ? select("存放文件夹", "folderId", folderOptions(resourceFolderIndex(plan)), item.folderId ?? data.folder ?? "") +
+          select("资源状态", "archived", [["", "在资源库"], ["yes", "放入归档桶"]], item.archived ? "yes" : "")
         : select("学科", "moduleId", allModules(), moduleId) +
           select("对应任务（可选）", "taskId", [["","直接关联学科"], ...taskOptions(moduleId, { currentId: item.taskId })], item.taskId ?? "")) +
       (isLog ? '<div class="fields">' + input("日期", "date", item.date ?? selected, 'type="date" required') +
@@ -489,7 +709,7 @@ function edit(cmd, data) {
         input(kind === "error" ? "题目来源" : "链接或存放位置", "source", item.source, isResource ? 'placeholder="例如网盘链接、电脑文件夹、书架第二层"' : "") +
         area(kind === "error" ? "失分原因与答案要点" : "用途与笔记", "text", item.text) +
         (kind === "error" ? select("复习状态", "reviewed", [["","待复习"],["yes","已复习"]], item.reviewed ? "yes" : "") : "")), id) +
-      (isResource && id ? '<div class="section">' + button("转为文件夹", "organizeResource", { id, operation: "folder" }) + "</div>" : ""));
+      (isResource && id && !item.archived ? '<div class="section">' + button("转为文件夹", "organizeResource", { id, operation: "folder" }) + "</div>" : ""));
   }
 }
 
@@ -514,6 +734,18 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", (event) => {
   const element = event.target;
+  if (element.matches('.timeline-filter select[name="timelineColor"]')) {
+    timelineColor = element.value;
+    render();
+    main.querySelector('.timeline-filter select')?.focus({ preventScroll: true });
+    return;
+  }
+  if (element.matches("[data-backup-file]")) return void previewBackup(element);
+  if (element.form?.dataset.action === "milestone" && element.name === "precision") {
+    for (const fields of element.form.querySelectorAll("[data-date-fields]")) {
+      fields.hidden = fields.disabled = fields.dataset.dateFields !== element.value;
+    }
+  }
   if (dialog.open && element.name === "moduleId" && element.form?.elements.taskId) {
     const taskSelect = element.form.elements.taskId;
     taskSelect.replaceChildren(new Option("直接关联学科", ""), ...taskOptions(element.value).map(([key, label]) => new Option(label, key)));
@@ -525,8 +757,14 @@ document.addEventListener("submit", (event) => {
   const action = target.dataset.action;
   if (!action) return;
   event.preventDefault();
+  if (action === "importBackup") {
+    if (target.backup) void save(action, { backup: target.backup }, target.querySelector(".form-error"));
+    return;
+  }
   const fields = new FormData(target);
   const data = Object.fromEntries(fields);
+  if (action === "removeModule" && !confirm(data.destination
+    ? "确认转移内容后删除此板块？" : "确认删除此板块及其全部任务、学习时间记录？")) return;
   if (action === "filter") { Object.assign(filters, data); render(); return; }
   if (target.dataset.id) data.id = target.dataset.id;
   if (action === "task") data.resourceIds = fields.getAll("resourceIds");
@@ -546,19 +784,54 @@ document.addEventListener("click", (event) => {
   const target = event.target.closest("[data-cmd]");
   if (!target) return;
   const { cmd, ...data } = target.dataset;
-  if (["task","module","course","log","note","resourceFolder"].includes(cmd)) return edit(cmd, data);
+  if (cmd === "toggleTimeline") {
+    timelineOpen = !timelineOpen;
+    document.getElementById("timeline-content").hidden = !timelineOpen;
+    target.setAttribute("aria-expanded", String(timelineOpen));
+    return;
+  }
+  if (cmd === "libraryArchive") {
+    libraryArchiveOpen = !libraryArchiveOpen;
+    const archive = document.getElementById("resource-archive");
+    archive.hidden = !libraryArchiveOpen;
+    target.setAttribute("aria-expanded", String(libraryArchiveOpen));
+    if (libraryArchiveOpen) archive.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (cmd === "toggleNote") {
+    const note = target.closest("[data-note-disclosure]").querySelector("[data-note-text]");
+    note.hidden = !note.hidden;
+    target.setAttribute("aria-expanded", String(!note.hidden));
+    return;
+  }
+  if (["task","module","moduleNote","course","log","note","resourceFolder","milestone","deleteModule","moveTaskModule"].includes(cmd)) return edit(cmd, data);
   if (cmd === "close") return dialog.close();
+  if (cmd === "importBackup") {
+    open("导入备份", '<form data-action="importBackup"><p>选择从文学考研规划导出的 JSON。导入只新增记录，' +
+      '现有任务、同日计划和备考设置均保留。</p><label>备份文件<input type="file" accept=".json,application/json" data-backup-file></label>' +
+      '<p data-backup-preview role="status"></p><p class="form-error" role="alert" hidden></p>' +
+      '<div><button class="primary" disabled>合并导入</button></div></form>');
+    return;
+  }
   if (cmd === "sectionExpand") {
-    const branch = document.getElementById("branch-" + data.id);
+    const branch = document.getElementById(target.getAttribute("aria-controls"));
     branch.hidden = !branch.hidden;
     const open = !branch.hidden;
     if (open) expanded.add(data.id);
-    else expanded.delete(data.id);
+    else {
+      expanded.delete(data.id);
+      if (pinnedModule === data.id) pinnedModule = "";
+    }
     target.setAttribute("aria-expanded", String(open));
     target.firstElementChild.textContent = open ? "▾" : "▸";
     return;
   }
   if (cmd === "day") { selected = data.date; return render(); }
+  if (cmd === "calendarMilestone") {
+    const item = (current().milestones ?? []).find((entry) => entry.id === data.id);
+    if (item) open("备考事项", milestoneInfo(item));
+    return;
+  }
   if (cmd === "calendarMode") { calendarMode = calendarMode === "month" ? "week" : "month"; return render(); }
   if (cmd === "calendar") {
     if (calendarMode === "week") selected = shifted(selected, Number(data.move) * 7);
@@ -589,6 +862,9 @@ function sameSortGroup(a, b) {
 
 function persistSort(source, target, after) {
   if (source.dataset.libraryId) {
+    if (target.dataset.libraryDrop === "archive") {
+      return save("archiveResource", { id: source.dataset.libraryId, archived: "yes" });
+    }
     const targetId = target.dataset.libraryId || "";
     if (targetId) {
       for (const folder of resourceFolderIndex(current()).path(targetId)) openFolders.add(folder.id);
@@ -597,9 +873,17 @@ function persistSort(source, target, after) {
     return save("organizeResource", { id: source.dataset.libraryId, operation: target.dataset.libraryDrop, targetId });
   }
   const { sortId, sortAction } = source.dataset;
-  if (source.dataset.taskModule && target.dataset.sectionDrop === source.dataset.taskModule) {
-    expanded.add(source.dataset.taskModule);
-    return save("makeSection", { id: sortId, moduleId: source.dataset.taskModule });
+  if (source.dataset.taskModule && target.dataset.section) {
+    expanded.add(target.dataset.taskModule);
+    expanded.add(target.dataset.section);
+    return save("moveTaskModule", {
+      id: sortId, destination: target.dataset.taskModule, parentId: target.dataset.section,
+    });
+  }
+  if (source.dataset.taskModule && target.dataset.sectionDrop) {
+    const destination = target.dataset.sectionDrop;
+    expanded.add(destination);
+    return save("moveTaskModule", { id: sortId, destination });
   }
   const idField = sortAction === "moveModule" ? "moduleId" : "id";
   return save(sortAction, { [idField]: sortId, target: target.dataset.sortId, after });
@@ -620,10 +904,16 @@ function markSort(position) {
     drop.dataset.insert = "library";
     return;
   }
+  const section = hit?.closest("[data-section]");
+  if (section && drag.source.dataset.taskModule && !drag.source.dataset.section) {
+    drag.target = section;
+    section.dataset.insert = "nest";
+    return;
+  }
   const header = hit?.closest("[data-section-drop]");
-  if (header && drag.source.dataset.taskModule === header.dataset.sectionDrop) {
+  if (header && drag.source.dataset.taskModule) {
     drag.target = header;
-    header.dataset.insert = "inside";
+    header.dataset.insert = "transfer";
     return;
   }
   const target = hit?.closest("[data-sort-id]");

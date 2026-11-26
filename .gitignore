@@ -1,0 +1,19 @@
+# Local runtime and dependencies
+node_modules/
+.local/
+.wrangler/
+__pycache__/
+
+# Personal configuration and credentials
+.env
+.env.*
+.dev.vars
+
+# Personal databases and exported backups
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+literature-plan-*.json
+*backup*.json
+backups/
